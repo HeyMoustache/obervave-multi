@@ -20,6 +20,8 @@ three effects after the voices. No second engine: one synth, as far as the chip 
 the FM-1's screen, keys, buttons and knobs, your computer keyboard or a MIDI keyboard. Build it with
 `sh web/sim/build.sh`, try it with `python3 -m http.server -d docs/sim` (see `web/sim/build.sh` for the two tools).
 
+**This branch: OberVave Multi**, six parts on MIDI channels 1-6: see [docs/MULTI.md](docs/MULTI.md).
+
 **M-Vave SMK-37:** see [SMK-37 instructions](SMK37.md).
 
 Hear it: [the video](video/) is nine OberVaves (the host build) playing one slow, dark track; every sound in it,
