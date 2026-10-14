@@ -54,14 +54,14 @@ static void pat_factory(uint32_t n, pattern_t *p)   /* a pattern never saved: em
 }
 
 /* ---- the player (ISR, per CTL block) */
-typedef struct { uint32_t cnt, dur, step, sub, rat_n, rat_i, gate_at, nsnd, play, tie; uint8_t snd[SEQ_CHORD]; } seqrun_t;
+typedef struct { uint32_t cnt, dur, step, sub, rat_n, rat_i, gate_at, nsnd, play, tie, part; uint8_t snd[SEQ_CHORD]; } seqrun_t;
 static seqrun_t sr[2];
 static uint32_t seq_was, seq_beat_cnt, seq_beat_n, count_left;
 
 static void seq_release(seqrun_t *r)
 {
     uint32_t i;
-    for (i = 0; i < r->nsnd; i++) voice_release(r->snd[i], 1);
+    for (i = 0; i < r->nsnd; i++) voice_release(r->part, r->snd[i], 1);
     r->nsnd = 0;
 }
 static uint32_t seq_note(const step_t *s, uint32_t i, int32_t transp)
@@ -73,7 +73,7 @@ static void seq_sound(seqrun_t *r, const step_t *s, int32_t transp)
     uint32_t i;
     for (i = 0; i < SEQ_CHORD && s->note[i] && r->nsnd < SEQ_CHORD; i++) {
         uint32_t n = seq_note(s, i, transp);
-        voice_trigger(n, s->vel ? s->vel : 100u);
+        voice_trigger(r->part, n, s->vel ? s->vel : 100u);
         r->snd[r->nsnd++] = (uint8_t)n;
     }
 }
@@ -91,7 +91,7 @@ static void seq_tie_into(seqrun_t *r, const step_t *s, int32_t transp, uint32_t 
     uint32_t i, j, keep = 0;
     for (i = j = 0; i < r->nsnd; i++) {
         if (play && seq_has(s, r->snd[i], transp)) { r->snd[j++] = r->snd[i]; keep++; }
-        else voice_release(r->snd[i], 1);
+        else voice_release(r->part, r->snd[i], 1);
     }
     r->nsnd = j;
     if (!play) return;
@@ -99,7 +99,7 @@ static void seq_tie_into(seqrun_t *r, const step_t *s, int32_t transp, uint32_t 
         uint32_t m = seq_note(s, i, transp);
         for (j = 0; j < keep && r->snd[j] != m; j++) ;
         if (j < keep) continue;
-        voice_trigger(m, s->vel ? s->vel : 100u);
+        voice_trigger(r->part, m, s->vel ? s->vel : 100u);
         r->snd[r->nsnd++] = (uint8_t)m;
     }
 }
@@ -146,6 +146,7 @@ static void seq_tick(void)
         const step_t *s;
         uint32_t len = k->len;
         if (!len) { seq_release(r); r->tie = 0; continue; }
+        if (!r->nsnd) r->part = ctl_trk_part[t] < NPART ? ctl_trk_part[t] : 0u;   /* the track's part (changes between notes) */
         if (r->cnt >= r->dur) {                 /* the next step */
             uint32_t base = q / DIV_PER_QUARTER[k->div % NDIV], sw;
             r->cnt -= r->dur;

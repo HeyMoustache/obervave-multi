@@ -38,10 +38,15 @@ static struct {
     uint8_t pat, click;                         /* pat: the sequencer pattern (its own sectors); click: CLICK_* */
     uint32_t used;                              /* bit n: user program n saved */
     patch_t user[NPROG];
+    /* multitimbral (appended: an older settings sector loads without these and keeps its programs) */
+    uint8_t pprog[NPART];                       /* each part's program */
+    uint8_t trk_part[2], focus, multi_pad;      /* the sequencer tracks' parts; the panel's part */
 } set;
+#define SET_OLD_SIZE ((uint32_t)((uint8_t *)&set.pprog - (uint8_t *)&set))   /* 1.2's settings: up to the programs */
 static uint32_t set_dirty, set_t;
 
 static uint32_t prog, edited, page = PG_PERFORM, hold, save_armed, save_t;
+static uint32_t part_ed[NPART];                 /* each part's edited flag (the panel shows the focus part's) */
 
 /* the sequencer, as the panel sees it */
 enum { REC_OFF, REC_READY, REC_ON };            /* REC: off, armed (the first note starts the loop), recording */
@@ -118,6 +123,36 @@ static void load_program(uint32_t n)
     live = p;
     prog = n;
     edited = 0;
+    set.pprog[focus] = (uint8_t)n;
+}
+static void load_program_part(uint32_t part, uint32_t n)   /* a program change on another part's channel */
+{
+    patch_t p;
+    n %= NPROG;
+    if (part == focus) { load_program(n); return; }
+    if (set.used >> n & 1u) p = set.user[n];
+    else patch_from_factory(&p, &FACTORY[n]);
+    parts[part] = p;
+    set.pprog[part] = (uint8_t)n;
+    part_ed[part] = 0;
+}
+static void focus_set(uint32_t n)               /* the panel moves to part n (the ISR lets the old part's keys go) */
+{
+    if (n >= NPART || n == focus) return;
+    part_ed[focus] = edited;
+    focus = n;
+    prog = set.pprog[n] % NPROG;
+    edited = part_ed[n];
+    set.focus = (uint8_t)n;
+}
+/* MIDI channel -> part: MULTI (0): ch 1-6 play parts 1-6, the others the focus part; 1..16 that channel only, the
+ * focus part; 17 OMNI. 255: not for us */
+#define MIDI_OMNI 17u
+static uint32_t midi_part(uint32_t ch)
+{
+    if (set.midi_ch == 0u) return ch <= NPART ? ch - 1u : focus;
+    if (set.midi_ch == MIDI_OMNI || ch == set.midi_ch) return focus;
+    return 255u;
 }
 
 static void load_pattern(uint32_t n)            /* the saved one, else the factory's */
@@ -228,6 +263,12 @@ static void cc_map_init(void)
     }
 }
 
+static void set_param_part(uint32_t part, uint32_t p, int32_t v)
+{
+    v = clampi(v, 0, PDEF[p].max);
+    parts[part].v[p] = (uint8_t)v;
+    part_ed[part] = 1;
+}
 static void set_param(uint32_t p, int32_t v)
 {
     v = clampi(v, 0, PDEF[p].max);
@@ -359,11 +400,14 @@ static void draw_header(void)
         static const char *const MODE_S[4] = {"POLY", "DUAL", "UNI", "MONO"};
         static const char *const FT_S[NFTYPE] = {"LP12", "HP12", "BP12", "NOTCH", "LP24", "SEM"};
         uint32_t arp = live.v[P_ARP_MODE] != 0, fx = live.v[P_CHO_MIX] || live.v[P_DLY_MIX] || live.v[P_REV_MIX], trk = seq_trk;
-        uint32_t n = slen(MODE_S[live.v[P_MODE] & 3u]) + 1u + slen(FT_S[live.v[P_FTYPE] % NFTYPE])
+        uint32_t n = 3u + slen(MODE_S[live.v[P_MODE] & 3u]) + 1u + slen(FT_S[live.v[P_FTYPE] % NFTYPE])
                    + (hold ? 5u : 0u) + (ctl_seq_run ? 4u : 0u) + (rec ? 4u : 0u);
         if (trk && n + 2u <= 23u) n += 2u; else trk = 0;
         if (arp && n + 4u <= 23u) n += 4u; else arp = 0;
         if (fx && n + 3u <= 23u) n += 3u; else fx = 0;
+        scat(tags, "P");                        /* the panel's part: P1 .. P6 */
+        fmt_u(tags + slen(tags), focus + 1u);
+        scat(tags, " ");
         scat(tags, MODE_S[live.v[P_MODE] & 3u]);
         scat(tags, " ");
         scat(tags, FT_S[live.v[P_FTYPE] % NFTYPE]);
@@ -451,13 +495,20 @@ static void draw_page(void)
         k[i].bip = 0;
         k[i].value[0] = 0;
         if (page == PG_GLOBAL && !layer && !SMK_PAD_HELD) {
-            static const char *const GL[4] = {"TEMPO", "CLICK", "MIDI CH", "TUNE"};
+            static const char *const GL[4] = {"TEMPO", "CLICK", "MIDI", "TUNE"};
             k[i].label = GL[i];
             k[i].present = 1;
             if (i == 0) { fmt_u(k[i].value, set.tempo); k[i].v = set.tempo - 40; k[i].max = 200; }
             else if (i == 1) { scat(k[i].value, CLICK_NAME[set.click % NCLICK]); k[i].v = set.click % NCLICK; k[i].max = NCLICK - 1; }
-            else if (i == 2) { if (set.midi_ch) fmt_u(k[i].value, set.midi_ch); else scat(k[i].value, "OMNI"); k[i].v = set.midi_ch; k[i].max = 16; }
+            else if (i == 2) { if (set.midi_ch == 0u) scat(k[i].value, "MULTI"); else if (set.midi_ch == MIDI_OMNI) scat(k[i].value, "OMNI"); else fmt_u(k[i].value, set.midi_ch); k[i].v = set.midi_ch; k[i].max = MIDI_OMNI; }
             else { scat(k[i].value, set.tune < 0 ? "-" : "+"); fmt_u(k[i].value + 1, (uint32_t)(set.tune < 0 ? -set.tune : set.tune)); scat(k[i].value, "c"); k[i].v = set.tune + 50; k[i].max = 100; k[i].bip = 1; }
+        } else if (page == PG_PARTS && !layer && !SMK_PAD_HELD) {
+            static const char *const PL[4] = {"PART", "TRACK A", "TRACK B", "VOLUME"};
+            k[i].label = PL[i];
+            k[i].present = 1;
+            if (i == 0) { scat(k[i].value, "P"); fmt_u(k[i].value + 1, focus + 1u); k[i].v = focus; k[i].max = NPART - 1u; }
+            else if (i < 3) { scat(k[i].value, "P"); fmt_u(k[i].value + 1, set.trk_part[i - 1u] + 1u); k[i].v = set.trk_part[i - 1u]; k[i].max = NPART - 1u; }
+            else { fmt_u(k[i].value, live.v[P_VOLUME]); k[i].v = live.v[P_VOLUME]; k[i].max = 127; }
         } else if (layer == L_EDIT || layer == L_FX || layer == L_GLO || layer == L_SAVE) {
             layer_knob(&k[i], i);
         } else if (seq_shown()) {
@@ -543,7 +594,7 @@ static void draw_hints(void)
     else if (step_held >= 0) ui_hints("KNOB: EDIT  TAP LATER: LONG", "NOTE  LEVEL  RATCHET  GATE", C_AMBER);
     else if (layer == L_SEQ) ui_hints("WHITE KEYS = STEPS  OCT: PAGE", "F#3-A#4: PAGE 1-8 " NM_HOME ": LOCK", C_AMBER);
     else if (layer == L_EDIT) ui_hints("KEY: ERASE THAT NOTE", "OCT-: UNDO  OCT+: REDO", C_AMBER);
-    else if (layer == L_GLO) ui_hints("KEY 1 2: MUTE A B  5 6: SOLO", "LAST KEY (G5): TAP TEMPO", C_AMBER);
+    else if (layer == L_GLO) ui_hints("KEY 1 2: MUTE A B  5 6: SOLO", "9-14: PART 1-6  G5: TAP", C_AMBER);
     else if (layer == L_SAVE) ui_hints("WHITE KEYS 1-8: PATTERN 1-8", "+ " NM_SELBTN " PRESSED: NEW SOUND", C_AMBER);
     else if (layer == L_FX) ui_hints("KNOBS: CHORUS DELAY REVERB", "AND THE DELAY'S TIME", C_AMBER);
     else ui_hints(ROT[r][0], ROT[r][1], C_CREAM);
@@ -722,6 +773,12 @@ static void glo_key(uint32_t k)
         pat.trk[t].mute = 0;
         pat.trk[t ^ 1u].mute = !solo;
         say(solo ? "SOLO OFF" : t ? "SOLO B" : "SOLO A");
+    } else if (s2 >= 8 && s2 < 8 + (int32_t)NPART) {   /* white keys 9-14: the panel's part 1-6 */
+        focus_set((uint32_t)(s2 - 8));
+        msg[0] = 0; scat(msg, "PART "); fmt_u(msg + slen(msg), focus + 1u);
+        say(msg);
+        set_dirty = 1; set_t = fm1_ms;
+        return;
     } else if (s2 == 15) {                      /* tap tempo: the mean of the last taps */
         tap_t[2] = tap_t[1]; tap_t[1] = tap_t[0]; tap_t[0] = fm1_ms;
         if (tap_t[1] && tap_t[0] - tap_t[1] < 2000u) {
@@ -761,15 +818,31 @@ static void app_main(void)
     if (settings_load(&set, sizeof set) || set.version != SET_VERSION) {
         uint32_t n;
         for (n = 0; n < sizeof set; n++) ((uint8_t *)&set)[n] = 0;
-        set.version = SET_VERSION;
-        set.tempo = 120;
+        if (!settings_load(&set, SET_OLD_SIZE) && set.version == SET_VERSION) {   /* 1.2's settings: keep them, add the parts */
+            for (n = 0; n < NPART; n++) set.pprog[n] = (uint8_t)(n ? n : set.prog);
+        } else {
+            for (n = 0; n < sizeof set; n++) ((uint8_t *)&set)[n] = 0;
+            set.version = SET_VERSION;
+            set.tempo = 120;
+            for (n = 0; n < NPART; n++) set.pprog[n] = (uint8_t)n;
+        }
+        set.trk_part[0] = set.trk_part[1] = 0;
+        set.focus = 0;
     }
     if (set.tempo < 40u || set.tempo > 240u) set.tempo = 120;
     if (set.oct < -2 || set.oct > 2) set.oct = 0;
-    if (set.midi_ch > 16u) set.midi_ch = 0;
+    if (set.midi_ch > MIDI_OMNI) set.midi_ch = 0;
     ctl_tempo = set.tempo;
     ctl_tune8 = set.tune * 256 / 100;
-    load_program(set.prog);
+    {   /* every part's program, then the panel on the saved part */
+        uint32_t n, f = set.focus < NPART ? set.focus : 0u;
+        for (n = 0; n < 2u; n++) { if (set.trk_part[n] >= NPART) set.trk_part[n] = 0; ctl_trk_part[n] = set.trk_part[n]; }
+        for (n = 0; n < NPART; n++) { focus = n; load_program(set.pprog[n]); part_ed[n] = 0; }
+        focus = f;
+        prog = set.pprog[f] % NPROG;
+        edited = 0;
+        for (n = 0; n < NPART; n++) { pt[n].cut_sm = parts[n].v[P_CUTOFF] << 8; pt[n].reso_sm = parts[n].v[P_RESO] << 8; }
+    }
     load_pattern(set.pat);
     ctl_panic = 0;
 
@@ -797,7 +870,7 @@ static void app_main(void)
                     erase_note(held_key[k]);
                     say("ERASED");
                 } else if (key_step[k] == 1u) seq_key_down(k);
-                else if (key_step[k] == 3u) { glo_key(k); layer_used = 1; }
+                else if (key_step[k] == 3u) { glo_key(k); layer_used = 1; dirty_hdr = dirty_tags = 1; }
                 else if (key_step[k] == 4u) {   /* SAVE held: white keys 1-8 = pattern 1-8 */
                     static char msg[16];
                     layer_used = 1;
@@ -861,10 +934,10 @@ static void app_main(void)
                         if (LL[k] == L_SEQ) np = is_seq_page(page) ? seq_back : (seq_back = page, PG_SEQ);
                         else if (LL[k] == L_EDIT) np = cycle_page(PG_OSC1, 5);
                         else if (LL[k] == L_FX) np = cycle_page(PG_CHORUS, 3);
-                        else if (LL[k] == L_GLO) np = page == PG_GLOBAL ? PG_VOICE : page == PG_VOICE ? PG_OUTPUT : PG_GLOBAL;
+                        else if (LL[k] == L_GLO) np = page == PG_GLOBAL ? PG_VOICE : page == PG_VOICE ? PG_OUTPUT : page == PG_OUTPUT ? PG_PARTS : PG_GLOBAL;
                         else if (save_armed) {      /* SAVE tapped twice: the program, or on the sequencer page the pattern */
                             if (is_seq_page(page)) pat_dirty = 1;
-                            else { set.user[prog] = live; set.used |= 1u << prog; set.prog = (uint8_t)prog; edited = 0; set_dirty = 1; set_t = fm1_ms; }
+                            else { set.user[prog] = live; set.used |= 1u << prog; edited = 0; set_dirty = 1; set_t = fm1_ms; }
                             save_armed = 0;
                             dirty_hdr = 1;
                         } else { save_armed = 1; save_t = fm1_ms; }
@@ -963,7 +1036,7 @@ static void app_main(void)
         /* encoders */
         if ((e = fm1_enc_take(ENC_PRESETS)) != 0) {
             load_program((uint32_t)((int32_t)prog + e + (int32_t)NPROG * 4) % NPROG);
-            set.prog = (uint8_t)prog; set_dirty = 1; set_t = fm1_ms;
+            set_dirty = 1; set_t = fm1_ms;
             dirty_hdr = dirty_page = dirty_tags = 1;
         }
         if ((e = fm1_enc_take(ENC_ALGORITHM)) != 0) {   /* ALGORITHM: the track (as sloopDX) */
@@ -987,9 +1060,16 @@ static void app_main(void)
             if (page == PG_GLOBAL && !layer && !SMK_PAD_HELD) {   /* (a held layer has the knobs, on every page) */
                 if (k == 0) { set.tempo = (uint8_t)clampi(set.tempo + e, 40, 240); ctl_tempo = set.tempo; }
                 else if (k == 1) set.click = (uint8_t)clampi((int32_t)(set.click % NCLICK) + (e > 0 ? 1 : -1), 0, NCLICK - 1);
-                else if (k == 2) set.midi_ch = (uint8_t)clampi(set.midi_ch + e, 0, 16);
+                else if (k == 2) set.midi_ch = (uint8_t)clampi(set.midi_ch + (e > 0 ? 1 : -1), 0, MIDI_OMNI);
                 else { set.tune = (int8_t)clampi(set.tune + e, -50, 50); ctl_tune8 = set.tune * 256 / 100; }
                 set_dirty = 1; set_t = fm1_ms;
+            } else if (page == PG_PARTS && !layer && !SMK_PAD_HELD) {
+                int32_t d = e > 0 ? 1 : -1;
+                if (k == 0) focus_set((uint32_t)clampi((int32_t)focus + d, 0, NPART - 1));
+                else if (k < 3) { set.trk_part[k - 1u] = (uint8_t)clampi((int32_t)set.trk_part[k - 1u] + d, 0, NPART - 1); ctl_trk_part[k - 1u] = set.trk_part[k - 1u]; }
+                else set_param(P_VOLUME, (int32_t)live.v[P_VOLUME] + e);
+                set_dirty = 1; set_t = fm1_ms;
+                dirty_hdr = dirty_tags = 1;
             } else if (layer == L_EDIT) {
                 edit_turn(k, e);
                 dirty_steps = 1;
@@ -1038,7 +1118,26 @@ static void app_main(void)
             }
             if (st == 0xFCu) { ctl_seq_run = 0; dirty_tags = dirty_steps = 1; continue; }
             if (st >= 0xF0u) continue;
-            if (set.midi_ch && ch != set.midi_ch) continue;
+            {
+                uint32_t part = midi_part(ch);
+                if (part == 255u) continue;
+                if (part != focus) {            /* another part: its notes, bend, pedal, volume, program and sound */
+                    if (kind == 0x90u && d2) note_event_p(part, 1, d1, d2);
+                    else if (kind == 0x80u || kind == 0x90u) note_event_p(part, 0, d1, 0);
+                    else if (kind == 0xE0u) ctl_bend[part] = (int32_t)(d1 | d2 << 7) - 8192;
+                    else if (kind == 0xC0u) { load_program_part(part, d1); set_dirty = 1; set_t = fm1_ms; }
+                    else if (kind == 0xB0u) {
+                        if (d1 == 7u) ctl_cc7[part] = d2;
+                        else if (d1 == 64u) ctl_sus[part] = d2 >= 64u;
+                        else if (d1 == 120u || d1 == 123u) ctl_panic = 1;
+                        else if (cc_map[d1]) {
+                            uint32_t q = cc_map[d1] - 1u;
+                            set_param_part(part, q, PDEF[q].max == 127 ? (int32_t)d2 : ((int32_t)d2 * PDEF[q].max + 63) / 127);
+                        }
+                    }
+                    continue;
+                }
+            }
             if (kind == 0x90u && d2) {
                 note_event(1, d1, d2); if (!live.v[P_ARP_MODE]) rec_note(1, d1, d2); pen_add(d1);
                 if (step_held >= 0 && !rec) {   /* a held step takes what MIDI plays: the first note starts the chord */
@@ -1052,11 +1151,11 @@ static void app_main(void)
                 dirty_steps = dirty_page = 1;
             }
             else if (kind == 0x80u || kind == 0x90u) { note_event(0, d1, 0); if (!live.v[P_ARP_MODE]) rec_note(0, d1, 0); if (notes_down) notes_down--; dirty_page |= rec; }
-            else if (kind == 0xE0u) ctl_bend = (int32_t)(d1 | d2 << 7) - 8192;
-            else if (kind == 0xC0u) { load_program(d1); dirty_hdr = dirty_page = dirty_tags = 1; set.prog = (uint8_t)prog; }
+            else if (kind == 0xE0u) ctl_bend[focus] = (int32_t)(d1 | d2 << 7) - 8192;
+            else if (kind == 0xC0u) { load_program(d1); dirty_hdr = dirty_page = dirty_tags = 1; set_dirty = 1; set_t = fm1_ms; }
             else if (kind == 0xB0u) {
-                if (d1 == 7u) ctl_cc7 = d2;
-                else if (d1 == 64u) ctl_sustain = d2 >= 64u;
+                if (d1 == 7u) ctl_cc7[focus] = d2;
+                else if (d1 == 64u) ctl_sus[focus] = d2 >= 64u;
                 else if (d1 == 120u || d1 == 123u) ctl_panic = 1;
                 else if (cc_map[d1]) {
                     uint32_t p = cc_map[d1] - 1u;
@@ -1132,7 +1231,7 @@ static void app_main(void)
         fm1_led_key(BTN_ENV, page == PG_FENV || page == PG_AENV);
         fm1_led_key(BTN_LFO, page >= PG_LFO && page <= PG_LFO2);
         fm1_led_key(BTN_FX, page >= PG_CHORUS && page <= PG_REVERB);
-        fm1_led_key(BTN_GLO, page >= PG_VOICE && page <= PG_GLOBAL);
+        fm1_led_key(BTN_GLO, page >= PG_VOICE && page <= PG_PARTS);
         fm1_led_key(BTN_SAVE, save_armed);
 #if BOARD_SMK37
         smk_leds();                             /* the step pads, FADER BANK, < > */

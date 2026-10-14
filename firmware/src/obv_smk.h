@@ -219,7 +219,7 @@ static void smk_wheels(void)
     mw = clampi(mw, 0, 127);
     b = smk_pw_bend(&pw, fm1_in.wheel[0], fm1_ms) * 8192 / (SMK_PW_ST * 4096);   /* -> the MIDI bend's -8192..8191 */
     b = clampi(b, -8192, 8191);
-    if (b != last_b) { last_b = b; ctl_bend = b; }   /* (only on a change: a MIDI bend in still works at rest) */
+    if (b != last_b) { last_b = b; ctl_bend[focus] = b; }   /* (only on a change: a MIDI bend in still works at rest) */
     if (mw != last_m) { last_m = mw; ctl_vib = mw; }
 }
 
@@ -282,7 +282,7 @@ static int smk_check(uint32_t *redraw)
     for (k = 0; k < 4u; k++) { scat(ln[3], " "); fmt_u(ln[3] + slen(ln[3]), fm1_in.fader[k]); }
     scat(ln[3], " BAT "); fmt_u(ln[3] + slen(ln[3]), fm1_in.batt);
     scat(ln[4], "WHEEL "); fmt_u(ln[4] + 6, fm1_in.wheel[0]); scat(ln[4], " "); fmt_u(ln[4] + slen(ln[4]), fm1_in.wheel[1]);
-    scat(ln[4], " B"); fmt_s(ln[4] + slen(ln[4]), ctl_bend / 64); scat(ln[4], " V"); fmt_u(ln[4] + slen(ln[4]), (uint32_t)ctl_vib);
+    scat(ln[4], " B"); fmt_s(ln[4] + slen(ln[4]), ctl_bend[focus] / 64); scat(ln[4], " V"); fmt_u(ln[4] + slen(ln[4]), (uint32_t)ctl_vib);
     scat(ln[5], "BTN "); smk_hex(ln[5] + 4, fm1_in.buttons, 5);
     for (k = 0; k < FM1_NKEY && !(fm1_in.keys >> k & 1u); k++) ;
     if (k < FM1_NKEY) { scat(ln[5], " KEY "); fmt_u(ln[5] + slen(ln[5]), k); scat(ln[5], " V"); fmt_u(ln[5] + slen(ln[5]), fm1_in.key_vel[k]); }
@@ -311,7 +311,7 @@ static void host_dump(void)
     printf("%6u ms  PADS", fm1_ms);
     for (p = 0; p < 16u; p++) printf(" %06X", padled_rgb[p]);
     printf("\n%6u ms  STATE bank=%u bend=%d vib=%d master=%d cutoff=%u reso=%u envamt=%u release=%u cho=%u dly=%u rev=%u"
-           " trk=%u seqpg=%u len=%u held=%d view=%u rec=%u run=%u\n", fm1_ms, smk_bank, ctl_bend, ctl_vib, smk_master,
+           " trk=%u seqpg=%u len=%u held=%d view=%u rec=%u run=%u\n", fm1_ms, smk_bank, ctl_bend[focus], ctl_vib, smk_master,
            live.v[P_CUTOFF], live.v[P_RESO], live.v[P_FENV_AMT], live.v[P_AR], live.v[P_CHO_MIX], live.v[P_DLY_MIX],
            live.v[P_REV_MIX], t, seq_pg[t], pat.trk[t].len, step_held, seq_shown(), rec, ctl_seq_run);
     printf("%6u ms  STEPS", fm1_ms);

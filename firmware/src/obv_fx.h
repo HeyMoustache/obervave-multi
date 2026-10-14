@@ -70,6 +70,7 @@ static inline int32_t tri_q(uint32_t ph)        /* a triangle -2048..2047 (so Q8
 static line_t cho, dl, dr, rv_pre, rv_in[4], rv_ap1, rv_d1, rv_ap2, rv_d2, rv_ap3, rv_d3, rv_ap4, rv_d4;
 static uint32_t cho_ph, cho_inc, rv_ph1, rv_ph2;
 static int32_t cho_depth_k, cho_mix, dly_mix, rev_mix, dly_fb, dly_tone_k, rev_decay, rev_damp_k;
+static int32_t p_dly_to_rev;                   /* part 1's REVERB MIX: how much of the echoes go into the reverb */
 static int32_t dly_time, dly_cur;               /* Q16 samples: the target and where the read is (it slews like a tape) */
 static int32_t dly_lpl, dly_lpr, rv_lp_in, rv_lpl, rv_lpr, rv_yl, rv_yr;
 #if REV_DIV == 2u
@@ -93,15 +94,17 @@ static void fx_init(void)
 }
 
 /* the patch's numbers, once per ISR call. quarter: frames per quarter note (the arp's clock) */
-static void fx_block(const patch_t *p, uint32_t quarter)
+/* the effects' sound comes from part 1's patch; how much of each part goes in is that part's MIX (a send, from the
+ * voices: obv_engine.h). any_*: some part sends to it. */
+static void fx_block(const patch_t *p, uint32_t quarter, uint32_t any_c, uint32_t any_d, uint32_t any_r)
 {
     int32_t d, t;
     uint32_t div = p->v[P_DLY_TIME] % NDDIV, samples;
     d = p->v[P_CHO_RATE]; cho_inc = (uint32_t)(10 + ((d * d * 590) >> 14)) * 974u;   /* 0.1 .. 5.9 Hz */
     cho_depth_k = p->v[P_CHO_DEPTH] * 67;       /* x the triangle's +-2048 = Q16 samples: up to +-6 ms */
-    cho_mix = p->v[P_CHO_MIX];
-    dly_mix = (p->v[P_DLY_MIX] * 180) >> 7;     /* wet up to 0.7 of the dry (Q8): the sum stays in range */
-    rev_mix = (p->v[P_REV_MIX] * 180) >> 7;
+    cho_mix = any_c != 0;                       /* the sends carry the levels: the returns are at full */
+    dly_mix = any_d != 0;
+    rev_mix = any_r != 0;
     dly_fb = p->v[P_DLY_FB] * 250;              /* up to 0.97 */
     t = p->v[P_DLY_TONE]; dly_tone_k = clampi(((t * t) >> 6) + 8, 8, 256);
     d = p->v[P_REV_SIZE]; rev_decay = 12000 + ((d * d * 19500) >> 14);   /* 0.37 .. 0.96: the top is a near-freeze */
@@ -112,6 +115,7 @@ static void fx_block(const patch_t *p, uint32_t quarter)
             if ((r + bit) * (r + bit) <= x) r += bit;
         rev_damp_k = 32768 - (int32_t)r;
     }
+    p_dly_to_rev = p->v[P_REV_MIX];
     rev_pre_n = 1u + (uint32_t)p->v[P_REV_PRE] * (41u / REV_DIV);
     samples = quarter * DDIV_NUM[div] / DDIV_DEN[div];
     if (samples > DLY_MAX - 4u) samples = DLY_MAX - 4u;
@@ -174,18 +178,18 @@ static inline void rev_tick(int32_t in)
     rv_yr = (b * 19661) >> 15;
 }
 
-static void fx_process(int32_t *out, uint32_t n)
+static void fx_process(int32_t *out, const int32_t *bc, const int32_t *bd, const int32_t *br, uint32_t n)
 {
     uint32_t i, do_dly = dly_active != 0, do_rev = rev_active != 0;
-    int32_t cm = cho_mix, dm = dly_mix, rm = rev_mix;
+    int32_t cm = cho_mix, d2r = (p_dly_to_rev * 180) >> 7;   /* d2r: the echoes into the reverb, part 1's reverb send */
     for (i = 0; i < n; i++) {
-        int32_t l = out[2u * i], r = out[2u * i + 1u];
+        int32_t l = out[2u * i], r = out[2u * i + 1u], rin = br[i];
         if (cm) {                               /* two taps a quarter turn apart on one line, around 12 ms */
-            int32_t bl = (529 << 16) + tri_q(cho_ph) * cho_depth_k, br = (529 << 16) + tri_q(cho_ph + 0x40000000u) * cho_depth_k;
+            int32_t bl = (529 << 16) + tri_q(cho_ph) * cho_depth_k, br2 = (529 << 16) + tri_q(cho_ph + 0x40000000u) * cho_depth_k;
             cho_ph += cho_inc;
-            line_write(&cho, (l + r) >> 1);
-            l += ((line_read_q16_h(&cho, bl) - l) * cm) >> 8;
-            r += ((line_read_q16_h(&cho, br) - r) * cm) >> 8;
+            line_write(&cho, bc[i]);            /* the send already took its share of the dry */
+            l += line_read_q16_h(&cho, bl);
+            r += line_read_q16_h(&cho, br2);
         }
         if (do_dly) {                           /* ping-pong: the input enters left, the feedback crosses */
             int32_t wl, wr;
@@ -195,27 +199,28 @@ static void fx_process(int32_t *out, uint32_t n)
             wr = line_read_q16(&dr, dly_cur);
             dly_lpl += ((wr - dly_lpl) * dly_tone_k) >> 8;
             dly_lpr += ((wl - dly_lpr) * dly_tone_k) >> 8;
-            line_write(&dl, ((l + r) >> 1) + ((dly_lpl * dly_fb) >> 15));
+            line_write(&dl, bd[i] + ((dly_lpl * dly_fb) >> 15));
             line_write(&dr, (dly_lpr * dly_fb) >> 15);
-            l += (wl * dm) >> 8;
-            r += (wr * dm) >> 8;
+            l += wl;
+            r += wr;
+            rin += (((wl + wr) >> 1) * d2r) >> 8;
         }
         if (do_rev) {
 #if REV_DIV == 2u                               /* half rate: a pair in, the output interpolated between ticks */
-            int32_t pl = rv_yl, pr = rv_yr, din = l + r;
+            int32_t pl = rv_yl, pr = rv_yr, din = 2 * rin;
             if (!(fx_odd ^= 1u)) {
                 rev_tick((rv_hold + din) >> 2);
-                l += (((pl + rv_yl) >> 1) * rm) >> 8;
-                r += (((pr + rv_yr) >> 1) * rm) >> 8;
+                l += (pl + rv_yl) >> 1;
+                r += (pr + rv_yr) >> 1;
             } else {
-                l += (rv_yl * rm) >> 8;
-                r += (rv_yr * rm) >> 8;
+                l += rv_yl;
+                r += rv_yr;
             }
             rv_hold = din;
 #else
-            rev_tick((l + r) >> 1);
-            l += (rv_yl * rm) >> 8;
-            r += (rv_yr * rm) >> 8;
+            rev_tick(rin);
+            l += rv_yl;
+            r += rv_yr;
 #endif
         }
         out[2u * i] = sat16(l);
