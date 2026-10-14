@@ -42,8 +42,8 @@ With one part playing, a sound without effects matches OberVave 1.2 (the samples
 it is very close; one difference: the chorus no longer feeds the delay and the reverb.
 
 The reverb runs at half the sample rate (a slightly darker tail, about 13% less work in all), and the very last
-stage is a soft limiter instead of a hard clip: above 3/4 of full scale the peaks are rounded off, so six loud
-parts with every effect up do not crackle.
+stage is a limiter instead of a hard clip: when the mix would go over, it turns the whole output down for a moment
+(and back up over about 50 ms), so six loud parts with every effect up do not crackle. Below that it changes nothing.
 
 ## What a part does in each voice mode
 

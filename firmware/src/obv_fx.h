@@ -187,6 +187,32 @@ static inline int32_t limit16(int32_t x)
     y = 24576 + (softclip(clampi(a - 24576, 0, 16383) * 4) >> 2);
     return x < 0 ? -y : y;
 }
+/* the output limiter: per 16 frames it looks at the block's peak first, so the gain is already down when a loud
+ * block starts (no overshoot); it comes back up over ~50 ms. Below LIM_CEIL nothing changes: gain 1.0 exactly. */
+#define LIM_CEIL 29000
+static int32_t lim_g = 32768;                   /* Q15 */
+static void lim_process(int32_t *out, uint32_t n)
+{
+    uint32_t b, i;
+    for (b = 0; b < n; b += 16u) {
+        int32_t peak = 0, target, g0 = lim_g, g1;
+        uint32_t m = n - b < 16u ? n - b : 16u;
+        for (i = 0; i < 2u * m; i++) {
+            int32_t a = out[2u * b + i];
+            if (a < 0) a = -a;
+            if (a > peak) peak = a;
+        }
+        target = peak > LIM_CEIL ? (int32_t)(((uint32_t)LIM_CEIL << 15) / (uint32_t)peak) : 32768;
+        if (target < g0) g0 = g1 = target;      /* down: at once, from the block's first frame */
+        else g1 = g0 + ((target - g0) >> 7) + (target > g0);   /* up: slowly (~50 ms) */
+        lim_g = g1;
+        for (i = 0; i < m; i++) {
+            int32_t g = g0 + (((g1 - g0) * (int32_t)i) >> 4);
+            out[2u * (b + i)] = limit16((int32_t)(((int64_t)out[2u * (b + i)] * g) >> 15));
+            out[2u * (b + i) + 1u] = limit16((int32_t)(((int64_t)out[2u * (b + i) + 1u] * g) >> 15));
+        }
+    }
+}
 static void fx_process(int32_t *out, const int32_t *bc, const int32_t *bd, const int32_t *br, uint32_t n)
 {
     uint32_t i, do_dly = dly_active != 0, do_rev = rev_active != 0;
@@ -233,7 +259,8 @@ static void fx_process(int32_t *out, const int32_t *bc, const int32_t *bd, const
             r += rv_yr;
 #endif
         }
-        out[2u * i] = limit16(l);
-        out[2u * i + 1u] = limit16(r);
+        out[2u * i] = l;
+        out[2u * i + 1u] = r;
     }
+    lim_process(out, n);
 }
