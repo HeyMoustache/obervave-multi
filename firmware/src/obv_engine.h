@@ -30,7 +30,7 @@ typedef struct {
     uint32_t seq;                               /* allocation order */
     uint8_t note, vel, gate;                    /* gate: the key (or the arp) holds it */
     uint8_t part, sus;                          /* the part that plays it; sus: let go, the part's pedal holds it */
-    int32_t gd, gc, gdl, grv;                   /* gains Q12: dry (with the chorus send taken out), chorus, delay, reverb sends */
+    int32_t gd, gm;                             /* gd: the dry share (the chorus send taken out), Q8; gm: the mono send gain, Q12 */
 } voice_t;
 
 /* the parts: each a whole OberVave sound. The panel (keys, knobs, arp, HOLD) works on the focus part; `live` is it. */
@@ -617,24 +617,19 @@ static void voice_block(voice_t *v, uint32_t card)
     ui_vlevel[card] = v->amp1;
     v->amp1 = (v->amp1 * g->vol_q12) >> 12;     /* the part's volume (one part alone: as the old output stage) */
     ui_vnote[card] = v->note;
-    {   /* the mix: dry less what the chorus takes, and the sends (mono) */
-        int32_t c = (v->gl + v->gr) >> 1;
-        v->gd = 256 - g->snd_c;
-        v->gc = (c * g->snd_c) >> 8;
-        v->gdl = (c * g->snd_d) >> 8;
-        v->grv = (c * g->snd_r) >> 8;
-    }
+    v->gd = 256 - g->snd_c;                     /* the mix: dry less what the chorus takes; the sends go through the part's bus */
+    v->gm = (g->snd_c | g->snd_d | g->snd_r) ? (v->gl + v->gr) >> 1 : 0;
 #undef live
 #define live (parts[focus])
 }
 
 /* ---- the samples of one voice: oscillators -> mix -> drive -> filter -> amp -> pan */
-static void voice_render(voice_t *v, int32_t *out, int32_t *bc, int32_t *bd, int32_t *br)
+static void voice_render(voice_t *v, int32_t *out, int32_t *pbus)
 {
     const part_t *g = &pt[v->part];
     uint32_t i, inc1 = v->inc1, inc2 = v->inc2, pw1 = v->pw1, pw2 = v->pw2, d1 = inc1 >> 15, d2 = inc2 >> 15;
     int32_t amp0 = v->amp0, da = v->amp1 - v->amp0, o2n = v->o2.prev;
-    int32_t gl = (v->gl * v->gd) >> 8, gr = (v->gr * v->gd) >> 8, gc = v->gc, gdl = v->gdl, grv = v->grv;
+    int32_t gl = (v->gl * v->gd) >> 8, gr = (v->gr * v->gd) >> 8, gm = v->gm;
     int32_t l1 = g->lvl1, l2 = g->lvl2, ln = g->lvln, drv = g->drive_q12, morph_q = g->morph_q;
     uint32_t ft = g->ftype, xq = g->xmod_q, sy = g->sync_on, ww1 = g->w1, ww2 = g->w2;
     int32_t hw1 = (ww1 & OSC_SAW ? -65536 : 0) + (ww1 & OSC_PLS ? -65536 : 0);
@@ -672,15 +667,14 @@ static void voice_render(voice_t *v, int32_t *out, int32_t *bc, int32_t *bd, int
         y = (y * amp) >> 16;
         out[2u * i] += (y * gl) >> 12;
         out[2u * i + 1u] += (y * gr) >> 12;
-        if (gc) bc[i] += (y * gc) >> 12;
-        if (gdl) bd[i] += (y * gdl) >> 12;
-        if (grv) br[i] += (y * grv) >> 12;
+        if (gm) pbus[i] += (y * gm) >> 12;      /* the part's mono bus: one add a voice, the sends once a part */
     }
     (void)o2n;
 }
 
 #define BUS_N 512u                              /* the frames of one call at most */
 static int32_t bus_c[BUS_N], bus_d[BUS_N], bus_r[BUS_N];   /* the effect sends, mono */
+static int32_t bus_p[NPART][CTL];               /* each part's mono send bus, one block */
 static void engine_audio(int32_t *out, uint32_t n)
 {
     uint32_t b, v, i, p, any_c = 0, any_d = 0, any_r = 0;
@@ -711,13 +705,28 @@ static void engine_audio(int32_t *out, uint32_t n)
                 }
             }
         }
-        for (v = 0; v < NV; v++) {
-            if (vc[v].ae.stage == E_IDLE && !vc[v].gate) {
-                if (ui_vlevel[v]) { ui_vlevel[v] = 0; vc[v].amp0 = vc[v].amp1 = 0; }
-                continue;
+        {
+            uint32_t sent = 0;
+            for (v = 0; v < NV; v++) {
+                if (vc[v].ae.stage == E_IDLE && !vc[v].gate) {
+                    if (ui_vlevel[v]) { ui_vlevel[v] = 0; vc[v].amp0 = vc[v].amp1 = 0; }
+                    continue;
+                }
+                voice_block(&vc[v], v);
+                p = vc[v].part;
+                if (vc[v].gm && !(sent >> p & 1u)) { sent |= 1u << p; for (i = 0; i < CTL; i++) bus_p[p][i] = 0; }
+                voice_render(&vc[v], out + 2u * b, bus_p[p]);
             }
-            voice_block(&vc[v], v);
-            voice_render(&vc[v], out + 2u * b, bus_c + b, bus_d + b, bus_r + b);
+            for (p = 0; p < NPART; p++) {       /* each sending part into the effects, at its send levels */
+                int32_t c = pt[p].snd_c, d = pt[p].snd_d, r = pt[p].snd_r;
+                if (!(sent >> p & 1u)) continue;
+                for (i = 0; i < CTL; i++) {
+                    int32_t m = bus_p[p][i];
+                    bus_c[b + i] += (m * c) >> 8;
+                    bus_d[b + i] += (m * d) >> 8;
+                    bus_r[b + i] += (m * r) >> 8;
+                }
+            }
         }
     }
     for (i = 0; i < n; i++) {                   /* the output stage: a gentle tanh, never a hard clip (the volume: per part, in the voices) */

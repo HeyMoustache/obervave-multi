@@ -5,7 +5,7 @@
  * REV_DIV 1: the reverb at the full rate (the sound comes first). 2: at half the rate, if the chip turns out
  * to need it: a dark hall loses little by it and it halves the reverb's time and memory. */
 #ifndef REV_DIV
-#define REV_DIV 1u
+#define REV_DIV 2u
 #endif
 #define RVL(x) ((uint32_t)((x) * 44100u / 29761u / REV_DIV))   /* the paper's 29761 Hz lengths at our rate */
 #define DLY_MAX 32768u                          /* a side of the delay: 743 ms */
@@ -178,16 +178,26 @@ static inline void rev_tick(int32_t in)
     rv_yr = (b * 19661) >> 15;
 }
 
+/* the last stage: up to 3/4 of full scale untouched, above it a tanh knee into the top quarter (never a hard clip:
+ * the mix of six parts and three effects can go over) */
+static inline int32_t limit16(int32_t x)
+{
+    int32_t a = x < 0 ? -x : x, y;
+    if (a <= 24576) return x;
+    y = 24576 + (softclip(clampi(a - 24576, 0, 16383) * 4) >> 2);
+    return x < 0 ? -y : y;
+}
 static void fx_process(int32_t *out, const int32_t *bc, const int32_t *bd, const int32_t *br, uint32_t n)
 {
     uint32_t i, do_dly = dly_active != 0, do_rev = rev_active != 0;
     int32_t cm = cho_mix, d2r = (p_dly_to_rev * 180) >> 7;   /* d2r: the echoes into the reverb, part 1's reverb send */
     for (i = 0; i < n; i++) {
-        int32_t l = out[2u * i], r = out[2u * i + 1u], rin = br[i];
+        int32_t l = out[2u * i], r = out[2u * i + 1u], rin = softclip(br[i]);   /* the sends soft-clipped as the dry is:
+                                                   a loud part cannot drive the effects (and the sum) into the hard limit */
         if (cm) {                               /* two taps a quarter turn apart on one line, around 12 ms */
             int32_t bl = (529 << 16) + tri_q(cho_ph) * cho_depth_k, br2 = (529 << 16) + tri_q(cho_ph + 0x40000000u) * cho_depth_k;
             cho_ph += cho_inc;
-            line_write(&cho, bc[i]);            /* the send already took its share of the dry */
+            line_write(&cho, softclip(bc[i]));            /* the send already took its share of the dry */
             l += line_read_q16_h(&cho, bl);
             r += line_read_q16_h(&cho, br2);
         }
@@ -199,7 +209,7 @@ static void fx_process(int32_t *out, const int32_t *bc, const int32_t *bd, const
             wr = line_read_q16(&dr, dly_cur);
             dly_lpl += ((wr - dly_lpl) * dly_tone_k) >> 8;
             dly_lpr += ((wl - dly_lpr) * dly_tone_k) >> 8;
-            line_write(&dl, bd[i] + ((dly_lpl * dly_fb) >> 15));
+            line_write(&dl, softclip(bd[i]) + ((dly_lpl * dly_fb) >> 15));
             line_write(&dr, (dly_lpr * dly_fb) >> 15);
             l += wl;
             r += wr;
@@ -223,7 +233,7 @@ static void fx_process(int32_t *out, const int32_t *bc, const int32_t *bd, const
             r += rv_yr;
 #endif
         }
-        out[2u * i] = sat16(l);
-        out[2u * i + 1u] = sat16(r);
+        out[2u * i] = limit16(l);
+        out[2u * i + 1u] = limit16(r);
     }
 }

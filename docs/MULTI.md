@@ -41,6 +41,10 @@ There is one chorus, one delay and one reverb, shared by all parts, like on a mi
 With one part playing, a sound without effects matches OberVave 1.2 (the samples differ by 4 at most, out of 32767). With effects
 it is very close; one difference: the chorus no longer feeds the delay and the reverb.
 
+The reverb runs at half the sample rate (a slightly darker tail, about 13% less work in all), and the very last
+stage is a soft limiter instead of a hard clip: above 3/4 of full scale the peaks are rounded off, so six loud
+parts with every effect up do not crackle.
+
 ## What a part does in each voice mode
 
 - **POLY:** one voice a note.
