@@ -1,0 +1,17 @@
+name: Build firmware
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip3 install Pillow
+      - run: tools/get_toolchain.sh "$HOME/.jieli"
+      - run: git clone --depth 1 --branch AC79NN_SDK_V1.2.1_2023-12-13 https://gitee.com/Jieli-Tech/fw-AC79_AIoT_SDK.git "$HOME/fw-AC79_AIoT_SDK"
+      - run: tests/run_host.sh
+      - run: ./build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: obervave-fwsc
+          path: build/obervave.fwsc
