@@ -269,6 +269,22 @@ static void set_param_part(uint32_t part, uint32_t p, int32_t v)
     parts[part].v[p] = (uint8_t)v;
     part_ed[part] = 1;
 }
+/* the program name over MIDI (a patch editor such as Tide Bank): CC 110 = the letter's position 0-9, CC 111 = the
+ * letter (ASCII 32-126; lower case shown upper case), then the position moves on. Returns 1 if the CC was one of them. */
+#define CC_NAME_POS 110u
+#define CC_NAME_CHR 111u
+static uint8_t name_pos[NPART];
+static int name_cc(uint32_t part, uint32_t cc, uint32_t v)
+{
+    if (cc == CC_NAME_POS) { name_pos[part] = (uint8_t)(v < PATCH_NAME ? v : 0u); return 1; }
+    if (cc != CC_NAME_CHR) return 0;
+    if (v >= 'a' && v <= 'z') v -= 32u;
+    if (v < 32u || v > 126u) v = ' ';
+    parts[part].v[NPARAM + name_pos[part] % PATCH_NAME] = (uint8_t)v;
+    name_pos[part] = (uint8_t)((name_pos[part] + 1u) % PATCH_NAME);
+    if (part == focus) edited = 1; else part_ed[part] = 1;
+    return 1;
+}
 static void set_param(uint32_t p, int32_t v)
 {
     v = clampi(v, 0, PDEF[p].max);
@@ -1130,6 +1146,7 @@ static void app_main(void)
                         if (d1 == 7u) ctl_cc7[part] = d2;
                         else if (d1 == 64u) ctl_sus[part] = d2 >= 64u;
                         else if (d1 == 120u || d1 == 123u) ctl_panic = 1;
+                        else if (name_cc(part, d1, d2)) ;
                         else if (cc_map[d1]) {
                             uint32_t q = cc_map[d1] - 1u;
                             set_param_part(part, q, PDEF[q].max == 127 ? (int32_t)d2 : ((int32_t)d2 * PDEF[q].max + 63) / 127);
@@ -1157,6 +1174,7 @@ static void app_main(void)
                 if (d1 == 7u) ctl_cc7[focus] = d2;
                 else if (d1 == 64u) ctl_sus[focus] = d2 >= 64u;
                 else if (d1 == 120u || d1 == 123u) ctl_panic = 1;
+                else if (name_cc(focus, d1, d2)) dirty_hdr = 1;
                 else if (cc_map[d1]) {
                     uint32_t p = cc_map[d1] - 1u;
                     set_param(p, PDEF[p].max == 127 ? (int32_t)d2 : ((int32_t)d2 * PDEF[p].max + 63) / 127);

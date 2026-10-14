@@ -14,6 +14,10 @@ program. They share the **8 voices**: a part takes voices when it plays and give
 Each part listens on its own channel for notes, pitch bend, the sustain pedal (CC 64), volume (CC 7), program
 change and every sound CC (the same numbers as OberVave: CC 74 cutoff, 71 resonance and so on).
 
+A patch editor can also set a part's program **name**: CC 110 sets the letter position (0-9), then each CC 111
+writes one letter (ASCII 32-126) and moves on. Tide Bank sends a sound's name this way, so it shows on the screen
+and SAVE keeps it.
+
 ## The panel
 
 The keys, the knobs, the arpeggiator and HOLD work on **one part at a time**, the *panel's part*. The screen's
